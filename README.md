@@ -62,10 +62,18 @@ Tool **tidak punya arg `namespace`**. Namespace selalu diambil dari header `X-Ev
 | `memory_search` | Hybrid retrieval (lexical+vector+graph). | `query`, `mode`, `limit`, `min_score` |
 | `memory_think` | Sintesis + gap analysis dengan citation. | `query`, `mode` |
 | `memory_graph` | Telusuri knowledge graph bertipe (multi-hop). | `start`, `edge`, `hops` |
-| `memory_capture` | Catat fakta cepat ke `inbox/`. | `text`, `title` |
+| `memory_capture` | Catat fakta cepat ke `inbox/`. | `text`, `title`, `tags` |
 | `memory_get_doc` | Baca isi penuh satu dokumen. | `slug` |
+| `memory_forget` | Hapus (soft-delete) satu dokumen, lalu re-sync. | `slug` |
 | `memory_stats` | Statistik knowledge store. | — |
 | `memory_list_namespaces` | Daftar semua brain. | — |
+
+`memory_capture` menerima `tags` (array, opsional, 1–8, lowercase `[a-z0-9_-]`),
+default `["captured"]` bila kosong. Tulis `[[Name]]` di dalam `text` untuk
+membangun edge knowledge graph; edge bertipe diinferensi dari kalimat berbahasa
+Inggris ("works at", "founded", "advises", "attended", "invested in", fallback
+`mentions`). Hapus dokumen dengan `memory_forget` (hapus `.md` + re-sync →
+soft-delete).
 
 ## Registrasi di klien MCP
 
