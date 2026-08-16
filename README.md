@@ -48,6 +48,7 @@ Folder `./vault` di host di-mount ke `/vault` di container; tiap namespace menja
 |---|---|---|
 | `EVOMEM_ROOT` | `./vault` | Direktori induk semua brain (1 namespace = 1 subfolder). |
 | `EVOMEM_DEFAULT_NAMESPACE` | `default` | Namespace fallback jika klien tidak mengirim header `X-Evomem-Namespace`. |
+| `EVOMEM_ALLOWED_HOSTS` | loopback only | Allowlist header `Host` (dipisah koma), atau `*` untuk semua. Default rmcp menolak Host selain `localhost/127.0.0.1/::1`. |
 | `BIND` | `0.0.0.0:8080` | Alamat bind endpoint MCP. |
 
 ## Tools

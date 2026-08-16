@@ -388,7 +388,22 @@ async fn main() -> anyhow::Result<()> {
 
     let server = EvomemServer { state };
 
-    let config = StreamableHttpServerConfig::default().with_json_response(true);
+    let mut config = StreamableHttpServerConfig::default().with_json_response(true);
+    // rmcp only accepts loopback Host headers by default (DNS-rebinding guard).
+    // Let the operator widen it: EVOMEM_ALLOWED_HOSTS=host1,host2,... or "*"
+    // (allow any Host). Leave unset for the secure loopback-only default.
+    if let Ok(hosts) = std::env::var("EVOMEM_ALLOWED_HOSTS") {
+        let list: Vec<String> = hosts
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if list.iter().any(|h| h == "*") {
+            config = config.disable_allowed_hosts();
+        } else if !list.is_empty() {
+            config = config.with_allowed_hosts(list);
+        }
+    }
     let service = StreamableHttpService::new(
         move || Ok(server.clone()),
         LocalSessionManager::default().into(),
