@@ -9,9 +9,9 @@ MCP server (Streamable HTTP) that **embeds [evomem](https://github.com/anvie/evo
 ```
 ┌──────────────┐  MCP (Streamable HTTP /mcp)   ┌─────────────────────┐
 │ MCP client   │ ─────────────────────────────▶ │ evomem-mcp-rs       │
-│ (Claude/     │   tools: memory_search/        │ (1 binary Rust)     │
-│  Cursor/agent│   memory_think/memory_graph/   │  evomem embedded    │
-│  you)        │   memory_capture/...           │  as a library       │
+│ (Claude/     │   tools: memory_remember/      │ (1 binary Rust)     │
+│  Cursor/agent│   memory_recall/               │  evomem embedded    │
+│  you)        │   memory_forget                │  as a library       │
 └──────────────┘                                └──────────┬──────────┘
                                                            │
                                               EVOMEM_ROOT/<namespace>/
@@ -23,7 +23,7 @@ MCP server (Streamable HTTP) that **embeds [evomem](https://github.com/anvie/evo
 ```
 
 - **Multi-namespace** — one server, many isolated brains. The namespace is chosen by the **client via the `X-Evomem-Namespace` header** (not a tool argument); the brain folder is `<EVOMEM_ROOT>/<namespace>/`.
-- **Disk is the source of truth** — knowledge lives in `.md` files; `.evomem.db` is rebuilt from `sync`.
+- **Disk is the source of truth** — knowledge lives in `.md` files; `.evomem.db` is rebuilt from disk.
 - **Deterministic, no LLM at retrieval time** — lexical + hash-vector + knowledge graph.
 
 ## Usage
@@ -53,26 +53,27 @@ The host `./vault` is mounted at `/vault` in the container; each namespace becom
 
 ## Tools
 
-Tools **have no `namespace` argument**. The namespace is always taken from the `X-Evomem-Namespace` header, so an agent cannot (and need not) choose a namespace itself — each agent's knowledge stays separate.
+The server exposes a lean, three-tool surface. Tools **have no `namespace`
+argument** — the namespace is always taken from the `X-Evomem-Namespace` header,
+so an agent cannot (and need not) choose a namespace itself; each agent's
+knowledge stays separate.
 
 | Tool | Purpose | Main input |
 |---|---|---|
-| `memory_init` | Ensure the namespace brain exists (idempotent). | — |
-| `memory_sync` | Re-index `.md` files → `.evomem.db`. | — |
-| `memory_search` | Hybrid retrieval (lexical+vector+graph). | `query`, `mode`, `limit`, `min_score` |
-| `memory_think` | Synthesis + gap analysis with citations. | `query`, `mode` |
-| `memory_graph` | Traverse the typed knowledge graph (multi-hop). | `start`, `edge`, `hops` |
-| `memory_capture` | Capture a quick fact into `inbox/`. | `text`, `title`, `tags` |
-| `memory_get_doc` | Read one document's full content. | `slug` |
+| `memory_remember` | Remember a durable fact into long-term memory (indexed immediately). | `text`, `title`, `tags` |
+| `memory_recall` | Recall from memory: `search` (hybrid lookup) \| `think` (synthesis + gaps) \| `graph` (traverse). | `query`, `mode`, `edge`, `hops` |
 | `memory_forget` | Soft-delete one document, then re-sync. | `slug` |
-| `memory_stats` | Knowledge store statistics. | — |
-| `memory_list_namespaces` | List all brains. | — |
 
-`memory_capture` accepts `tags` (array, optional, 1–8, lowercase `[a-z0-9_-]`),
-defaulting to `["captured"]` when empty. Write `[[Name]]` inside `text` to build
-knowledge-graph edges; edge types are inferred from English sentences ("works
-at", "founded", "advises", "attended", "invested in", fallback `mentions`).
-Delete a document with `memory_forget` (remove `.md` + re-sync → soft-delete).
+`memory_remember` accepts `tags` (array, optional, 1–8, lowercase `[a-z0-9_-]`),
+defaulting to `["captured"]` when empty. Wrap entity names in `[[Name]]` inside
+`text` to build knowledge-graph edges; edge types are inferred from English
+sentences ("works at", "founded", "advises", "attended", "invested in", fallback
+`mentions`).
+
+`memory_recall`'s `mode` is `search` (default) | `think` | `graph`. `edge` and
+`hops` apply only to `graph` mode (where `query` is the start entity).
+
+`memory_forget` removes the document's `.md` file and re-indexes (soft-delete).
 
 ## Registering with MCP clients
 
@@ -95,7 +96,7 @@ The namespace is pinned client-side via a header. One server, many clients — e
 }
 ```
 
-An agent connected as `evomem-alpha` always reads/writes `workspace-alpha`, and `evomem-beta` reads/writes `workspace-beta` — even though both call `memory_search`/`memory_capture` with no `namespace` argument.
+An agent connected as `evomem-alpha` always reads/writes `workspace-alpha`, and `evomem-beta` reads/writes `workspace-beta` — even though both call `memory_remember`/`memory_recall` with no `namespace` argument.
 
 ### Cursor
 
@@ -131,7 +132,7 @@ aliases: [alice]
 [[Alice]] founded [[Nuwaira]] and works at [[Acme Corp]].
 ```
 
-After writing the file, call `memory_sync` (or let `memory_capture` index immediately).
+`memory_remember` writes documents like this and indexes them immediately.
 
 ## Technical notes
 
