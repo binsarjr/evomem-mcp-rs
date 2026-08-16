@@ -1,0 +1,12 @@
+services:
+  evomem-mcp:
+    build: .
+    environment:
+      EVOMEM_ROOT: /vault
+      EVOMEM_DEFAULT_NAMESPACE: default
+      BIND: 0.0.0.0:8080
+    volumes:
+      - ./vault:/vault
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
