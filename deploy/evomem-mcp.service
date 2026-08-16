@@ -1,0 +1,21 @@
+[Unit]
+Description=evomem-mcp-rs MCP memory server (Streamable HTTP)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=evomem
+Group=evomem
+WorkingDirectory=/home/evomem/evomem-mcp-rs
+Environment=EVOMEM_ROOT=/home/evomem/vault
+Environment=EVOMEM_DEFAULT_NAMESPACE=default
+Environment=BIND=0.0.0.0:8090
+ExecStart=/home/evomem/evomem-mcp-rs/target/release/evomem-mcp-rs
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
