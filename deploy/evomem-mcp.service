@@ -11,7 +11,7 @@ WorkingDirectory=/home/evomem/evomem-mcp-rs
 Environment=EVOMEM_ROOT=/home/evomem/vault
 Environment=EVOMEM_DEFAULT_NAMESPACE=default
 Environment=BIND=0.0.0.0:8090
-Environment=EVOMEM_ALLOWED_HOSTS=raspberrypi.local,192.168.18.13,localhost,127.0.0.1,::1
+Environment=EVOMEM_ALLOWED_HOSTS=your-host.local,192.168.1.10,localhost,127.0.0.1,::1
 ExecStart=/home/evomem/evomem-mcp-rs/target/release/evomem-mcp-rs
 Restart=always
 RestartSec=2
