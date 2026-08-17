@@ -48,6 +48,7 @@ The host `./vault` is mounted at `/vault` in the container; each namespace becom
 |---|---|---|
 | `EVOMEM_ROOT` | `./vault` | Parent directory of all brains (1 namespace = 1 subfolder). |
 | `EVOMEM_DEFAULT_NAMESPACE` | `default` | Fallback namespace when the client sends no `X-Evomem-Namespace` header. |
+| `EVOMEM_DEFAULT_AUTHOR` | `inbox` | Fallback author folder when the client sends no `X-Evomem-Author` header. |
 | `EVOMEM_ALLOWED_HOSTS` | loopback only | Comma-separated `Host` header allowlist, or `*` for all. rmcp rejects non-`localhost/127.0.0.1/::1` hosts by default. |
 | `BIND` | `0.0.0.0:8080` | Bind address of the MCP endpoint. |
 
@@ -116,6 +117,41 @@ Cursor's MCP config (`.cursor/mcp.json`) also supports headers:
 > For production, put it behind a reverse proxy + TLS and add an auth token at the proxy layer (this server does not authenticate on its own).
 
 > **Isolation note:** this is not a security mechanism (the header can be edited by hand in the client config). Its purpose is to **pin the namespace at the client-config level**, not in an agent argument, so an agent can't accidentally use another brain. If you need hard isolation (anti-spoofing), add an auth token at the proxy layer.
+
+## Team memory (multiple authors per namespace)
+
+One namespace can be a **shared team brain**: each member writes to their own
+folder, while `memory_recall` searches the whole namespace.
+
+- `memory_remember` and `memory_forget` are scoped to the caller's **author**
+  folder, chosen client-side via the `X-Evomem-Author` header (never a tool
+  argument). The folder becomes the document's evomem `source_dir`.
+- `memory_recall` is **not** author-scoped — it always searches the entire
+  namespace, so any member can recall the whole team's knowledge.
+- `memory_forget` is fail-closed: a member can only forget documents in their
+  own folder (a cross-author forget returns an error).
+
+```json
+{
+  "mcpServers": {
+    "evomem-team": {
+      "url": "http://localhost:8080/mcp",
+      "headers": {
+        "X-Evomem-Namespace": "team-project",
+        "X-Evomem-Author": "binsar"
+      }
+    }
+  }
+}
+```
+
+Author names are normalized to a safe folder segment (`a-z0-9_-`, lowercased).
+Reserved names `test` and `attachments` are rejected because evomem
+hard-excludes them from recall. Leave the header unset for the single-user
+default (`inbox`).
+
+> Team isolation is the namespace boundary: recall is global **within** a
+> namespace and never crosses into another namespace.
 
 ## Writing knowledge to a brain
 

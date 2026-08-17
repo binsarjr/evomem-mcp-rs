@@ -71,6 +71,32 @@ fn normalize_namespace(ns: Option<&str>) -> Result<String, String> {
     Ok(ns.to_string())
 }
 
+/// Validate an author (team member) name and normalize it to a safe folder
+/// segment. Reserved names that evomem hard-excludes from recall are rejected.
+fn normalize_author(author: Option<&str>) -> Result<String, String> {
+    let default =
+        std::env::var("EVOMEM_DEFAULT_AUTHOR").unwrap_or_else(|_| "inbox".to_string());
+    let author: &str = author
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(default.as_str());
+    if author == "." || author == ".." || author.contains('/') || author.contains('\\') || author.contains('\0') {
+        return Err(format!("invalid author '{author}'"));
+    }
+    if author.chars().any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_')) {
+        return Err(format!(
+            "author '{author}' contains invalid characters (a-z, 0-9, '-', '_' only)"
+        ));
+    }
+    let normalized = author.to_lowercase();
+    if normalized == "test" || normalized == "attachments" {
+        return Err(format!(
+            "author '{author}' is a reserved evomem folder name (excluded from recall)"
+        ));
+    }
+    Ok(normalized)
+}
+
 fn parse_mode(s: Option<&str>) -> Mode {
     s.and_then(|m| m.parse().ok()).unwrap_or_default()
 }
@@ -161,10 +187,26 @@ fn normalize_tags(tags: Option<Vec<String>>) -> Vec<String> {
 /// NOT passed by the agent — the agent never chooses its own namespace).
 const NAMESPACE_HEADER: &str = "x-evomem-namespace";
 
+/// Header the MCP client sets to identify the author (team member). Falls back
+/// to `EVOMEM_DEFAULT_AUTHOR` / "inbox" when absent.
+const AUTHOR_HEADER: &str = "x-evomem-author";
+
 /// Read the namespace from the request header, if present.
 fn namespace_from_header(ctx: &RequestContext<RoleServer>) -> Option<String> {
     let parts = ctx.extensions.get::<axum::http::request::Parts>()?;
     let value = parts.headers.get(NAMESPACE_HEADER)?.to_str().ok()?;
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+/// Read the author (team member) from the request header, if present.
+fn author_from_header(ctx: &RequestContext<RoleServer>) -> Option<String> {
+    let parts = ctx.extensions.get::<axum::http::request::Parts>()?;
+    let value = parts.headers.get(AUTHOR_HEADER)?.to_str().ok()?;
     let value = value.trim();
     if value.is_empty() {
         None
@@ -208,6 +250,12 @@ impl EvomemServer {
     /// The agent cannot override it — only the client configuration can.
     fn resolve_namespace(&self, ctx: &RequestContext<RoleServer>) -> Result<String, String> {
         normalize_namespace(namespace_from_header(ctx).as_deref())
+    }
+
+    /// Resolve the author (team member) for a request: header wins, else default.
+    /// The agent cannot override it — only the client configuration can.
+    fn resolve_author(&self, ctx: &RequestContext<RoleServer>) -> Result<String, String> {
+        normalize_author(author_from_header(ctx).as_deref())
     }
 }
 
@@ -277,6 +325,7 @@ impl EvomemServer {
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<Value>, String> {
         let ns = self.resolve_namespace(&ctx)?;
+        let author = self.resolve_author(&ctx)?;
         let store = self.resolve_store(&ns)?;
         let emb = Arc::clone(&self.state.embedder);
         let text = p.text;
@@ -287,7 +336,7 @@ impl EvomemServer {
             let file_slug = slugify(&title);
             let now = chrono::Utc::now();
             let stamp = now.format("%Y-%m-%d-%H%M%S");
-            let base_slug = format!("inbox/{stamp}-{file_slug}");
+            let base_slug = format!("{author}/{stamp}-{file_slug}");
 
             // Same-second captures with the same title must not overwrite each other.
             let (slug, abs_path) = {
@@ -381,6 +430,7 @@ impl EvomemServer {
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<Value>, String> {
         let ns = self.resolve_namespace(&ctx)?;
+        let author = self.resolve_author(&ctx)?;
         let store = self.resolve_store(&ns)?;
         let emb = Arc::clone(&self.state.embedder);
         let slug = p.slug;
@@ -388,6 +438,12 @@ impl EvomemServer {
             let doc = s
                 .resolve_doc(&slug)?
                 .ok_or_else(|| EvoError::DocNotFound(slug.clone()))?;
+            if doc.source_dir != author {
+                return Err(EvoError::Other(format!(
+                    "forbidden: document belongs to author '{}', not '{}'",
+                    doc.source_dir, author
+                )));
+            }
             let path = s.brain_root.join(format!("{}.md", doc.slug));
             std::fs::remove_file(&path)?;
             // Re-sync: soft-deletes the missing doc and resolves dangling links.
