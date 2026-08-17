@@ -1,0 +1,13 @@
+[
+  {
+    "id": "memoryagentbench-smoke-1",
+    "category": "conflict-resolution",
+    "events": [
+      {"id": "old", "author": "alice", "text": "The service region is east."},
+      {"id": "new", "author": "bob", "text": "The service region changed from east to west."}
+    ],
+    "question": "What is the current service region?",
+    "answer": "west",
+    "evidence_ids": ["new"]
+  }
+]

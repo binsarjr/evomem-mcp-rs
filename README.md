@@ -565,6 +565,23 @@ default (`inbox`).
 > Team isolation is the namespace boundary: recall is global **within** a
 > namespace and never crosses into another namespace.
 
+### Evaluate whether author provenance is worth keeping
+
+The production server intentionally stays independent from the evaluator. The
+Python companion in [`benchmarks/`](benchmarks/) replays the same writes into
+an anonymous brain and an author-aware brain, then compares recall, answer
+quality, provenance, conflicts, duplicates, forget isolation, and latency.
+
+```bash
+uv run --project benchmarks evomem-eval run --suite all --profile smoke --fake-model
+```
+
+Use the smoke profile for a local, network-free integration check. The full
+profile downloads the pinned public benchmark revisions and requires separate
+OpenAI-compatible reader and judge settings. See
+[`benchmarks/README.md`](benchmarks/README.md) for the complete setup, gates,
+result format, and the 14-day two-author pilot check.
+
 ## Writing knowledge to a brain
 
 A brain is a markdown folder. Example doc with inline `[[wiki-link]]` (builds the knowledge graph):

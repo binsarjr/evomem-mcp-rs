@@ -1,0 +1,10 @@
+[
+  {
+    "id": "longmemeval-smoke-1",
+    "category": "single-session-user",
+    "events": [{"id": "session-1", "author": "user", "timestamp": "2026-01-01", "text": "My preferred editor theme is Solarized Dark."}],
+    "question": "Which editor theme do I prefer?",
+    "answer": "Solarized Dark",
+    "evidence_ids": ["session-1"]
+  }
+]

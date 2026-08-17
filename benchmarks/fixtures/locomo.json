@@ -1,0 +1,13 @@
+[
+  {
+    "id": "locomo-smoke-1",
+    "category": "multi-hop",
+    "events": [
+      {"id": "d1", "author": "Caroline", "text": "I joined the climbing club."},
+      {"id": "d2", "author": "Melanie", "text": "The climbing club meets at Riverside Gym."}
+    ],
+    "question": "Where does Caroline's new club meet?",
+    "answer": "Riverside Gym",
+    "evidence_ids": ["d1", "d2"]
+  }
+]

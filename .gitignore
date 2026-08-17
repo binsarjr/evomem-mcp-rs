@@ -4,3 +4,9 @@
 *.db
 *.db-wal
 *.db-shm
+/benchmarks/.cache/
+/benchmarks/.venv/
+/benchmarks/results/
+/benchmarks/.env
+__pycache__/
+*.py[cod]
