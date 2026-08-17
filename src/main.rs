@@ -17,12 +17,12 @@ use evomem::error::EvoError;
 use evomem::model::Mode;
 use evomem::store::Store;
 use evomem::{ingest, search, think};
-use rmcp::handler::server::wrapper::{Json, Parameters};
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::CallToolResult;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{schemars, service::RequestContext, tool, tool_router, RoleServer};
 use serde::Deserialize;
-use serde_json::Value;
 
 mod setup;
 
@@ -362,7 +362,7 @@ impl EvomemServer {
         &self,
         Parameters(p): Parameters<RememberParams>,
         ctx: RequestContext<RoleServer>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<CallToolResult, String> {
         let ns = self.resolve_namespace(&ctx)?;
         let author = self.resolve_author(&ctx)?;
         let store = self.resolve_store(&ns)?;
@@ -415,7 +415,7 @@ impl EvomemServer {
             }))
         })
         .await
-        .map(Json)
+        .map(CallToolResult::structured)
     }
 
     #[tool(
@@ -425,7 +425,7 @@ impl EvomemServer {
         &self,
         Parameters(p): Parameters<RecallParams>,
         ctx: RequestContext<RoleServer>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<CallToolResult, String> {
         let ns = self.resolve_namespace(&ctx)?;
         let store = self.resolve_store(&ns)?;
         let emb = Arc::clone(&self.state.embedder);
@@ -442,7 +442,7 @@ impl EvomemServer {
                 Ok(serde_json::json!({ "start": doc.slug, "edges": edges }))
             })
             .await
-            .map(Json),
+            .map(CallToolResult::structured),
             "think" => run_block(store, emb, move |s, e| {
                 let resp = think::think(
                     s,
@@ -454,13 +454,13 @@ impl EvomemServer {
                 Ok(serde_json::to_value(&resp).expect("serializable"))
             })
             .await
-            .map(Json),
+            .map(CallToolResult::structured),
             _ => run_block(store, emb, move |s, e| {
                 let resp = search::search(s, e, &query, parse_mode(None), 0.03)?;
                 Ok(serde_json::to_value(&resp).expect("serializable"))
             })
             .await
-            .map(Json),
+            .map(CallToolResult::structured),
         }
     }
 
@@ -471,7 +471,7 @@ impl EvomemServer {
         &self,
         Parameters(p): Parameters<ForgetParams>,
         ctx: RequestContext<RoleServer>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<CallToolResult, String> {
         let ns = self.resolve_namespace(&ctx)?;
         let author = self.resolve_author(&ctx)?;
         let store = self.resolve_store(&ns)?;
@@ -494,7 +494,7 @@ impl EvomemServer {
             Ok(serde_json::json!({ "slug": doc.slug, "forgotten": true }))
         })
         .await
-        .map(Json)
+        .map(CallToolResult::structured)
     }
 }
 
@@ -581,5 +581,12 @@ mod tests {
         assert!(instructions.contains("memory_recall"));
         assert!(instructions.contains("memory_remember"));
         assert!(instructions.contains("memory_forget"));
+    }
+
+    #[test]
+    fn tool_schemas_are_compatible_with_all_supported_clients() {
+        for tool in EvomemServer::tool_router().list_all() {
+            assert!(tool.output_schema.is_none());
+        }
     }
 }

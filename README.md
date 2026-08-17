@@ -76,16 +76,15 @@ sentences ("works at", "founded", "advises", "attended", "invested in", fallback
 
 `memory_forget` removes the document's `.md` file and re-indexes (soft-delete).
 
-## Codex and Claude Code setup
+## Project setup for coding harnesses
 
-The installer configures one project only: Codex and Claude Code share the
-chosen namespace, while unrelated projects do not load Evomem. It safely merges
-existing config, installs the shared memory skill, and adds a binary lifecycle
-hook that asks the model to checkpoint only verified durable facts.
+The installer configures one project only. Every selected harness sends the
+same namespace header, so they share one project brain while unrelated projects
+do not load it. Existing config is merged, not replaced.
 
 Examples use `http://localhost:8080/mcp` and namespace `personal`. Replace the
-URL when the server runs on another machine. Use the same namespace in both
-clients to share a brain.
+URL when the server runs on another machine. Use the same namespace in every
+harness that should share a brain.
 
 ### Step 1: install the binary
 
@@ -94,7 +93,7 @@ cargo install --git https://github.com/binsarjr/evomem-mcp-rs
 ```
 
 The same binary runs the MCP server and installs project integration. No Python
-runtime or separate hook script is required.
+runtime or manually maintained hook script is required.
 
 ### Step 2: start or identify the server
 
@@ -116,38 +115,61 @@ evomem-mcp-rs setup \
   --namespace personal
 ```
 
-`--client all` is the default. Use `--client codex` or
-`--client claude-code` to target one client, and add `--dry-run` to preview
-without writing. Run the same command again after an upgrade; it is idempotent
-and does not duplicate hooks, permissions, or instruction blocks.
+`--client all` is the default and configures supported harnesses detected from
+`PATH`, standard editor locations, or existing project markers. Force one with
+`--client codex`, `claude-code`, `opencode`, `gemini-cli`, `cursor`, or
+`roo-code`. Add `--dry-run` to preview without writing. Re-running setup is
+idempotent.
 
-The installer creates or merges:
+Fasticket workspace example:
 
-- `.codex/config.toml` and `.codex/hooks.json`
-- `.mcp.json` and `.claude/settings.local.json`
-- `.agents/skills/evomem-memory` and Claude's project skill link
-- managed Evomem blocks in `AGENTS.md` and `CLAUDE.md`
+```bash
+evomem-mcp-rs setup \
+  --project /Users/user/Workspaces/fasticket/fasticket-workspaces \
+  --url http://raspberrypi.local:8090/mcp \
+  --namespace fasticket-dev
+```
 
-Only `memory_recall` and `memory_remember` are pre-approved.
-`memory_forget` remains interactive. Existing changed files receive a sibling
-`*.evomem.bak` backup. For a non-Git workspace root, the installer also adds
-`.codex` to the user-level Codex project-root markers; the MCP URL and namespace
-still remain project-only.
+All adapters use the canonical `.agents/skills/evomem-memory` skill and the
+same `X-Evomem-Namespace` value:
 
-Restart each client from the project root, then trust the project's MCP server
-and hook when prompted. Verify with `/mcp`; Claude Code should also list
-`/evomem-memory` under `/skills`.
+| Harness | Project MCP config | Compaction behavior |
+| --- | --- | --- |
+| Codex | `.codex/config.toml` | Binary `SessionStart` hook |
+| Claude Code | `.mcp.json` | Binary `SessionStart` hook |
+| OpenCode | `opencode.json` | Auto-loaded project plugin preserves a checkpoint action |
+| Gemini CLI | `.gemini/settings.json` | MCP + skill; all memory tools remain interactive |
+| Cursor | `.cursor/mcp.json` | MCP + skill; `preCompact` is observational only |
+| Roo Code | `.roo/mcp.json` | MCP + skill; no lifecycle hook is installed |
 
-### Step 4: verify the hook
+Codex, Claude Code, OpenCode, and Roo Code pre-approve only `memory_recall` and
+`memory_remember`; `memory_forget` remains interactive. Gemini leaves all three
+interactive, and Cursor uses its normal MCP approval UI. Existing changed files
+receive a sibling `*.evomem.bak` backup. For a non-Git Codex workspace root,
+setup adds `.codex` to the user-level project-root markers; the MCP URL and
+namespace still remain project-only.
+
+Restart each harness from the project root and trust project files when asked.
+Check its MCP and skills UI before using memory.
+
+Official client references: [OpenCode](https://dev.opencode.ai/docs/mcp-servers/),
+[Gemini CLI](https://geminicli.com/docs/tools/mcp-server/),
+[Cursor](https://cursor.com/docs/mcp), and
+[Roo Code](https://roocodeinc.github.io/Roo-Code/features/mcp/using-mcp-in-roo/).
+The setup command currently targets macOS and Linux; Claude's compatibility
+skill uses a project symlink.
+
+### Step 4: verify the integrations
 
 ```bash
 printf '%s\n' '{"hook_event_name":"SessionStart","source":"compact"}' | \
   evomem-mcp-rs hook compact
 ```
 
-The command prints a Codex-compatible `hookSpecificOutput` object. Then ask one
-client to remember a harmless unique fact and the other to recall it. Run
-`/compact` to exercise the installed lifecycle hook.
+The command prints the Codex/Claude-compatible hook output. Then ask one
+harness to remember a harmless unique fact and another to recall it. Run
+`/compact` in Codex, Claude Code, or OpenCode to exercise its installed
+compaction integration.
 
 ### Manual setup (fallback)
 
@@ -202,6 +224,113 @@ Code asks on first launch. `alwaysLoad` keeps all three memory tools available
 from the first turn and requires Claude Code 2.1.121 or newer. Inside Claude
 Code, use `/mcp` to inspect connection health.
 
+#### Connect OpenCode to the same project
+
+Create `<project-root>/opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "evomem": {
+      "type": "remote",
+      "url": "http://localhost:8080/mcp",
+      "enabled": true,
+      "headers": {
+        "X-Evomem-Namespace": "personal"
+      }
+    }
+  },
+  "permission": {
+    "evomem_memory_recall": "allow",
+    "evomem_memory_remember": "allow",
+    "evomem_memory_forget": "ask"
+  }
+}
+```
+
+The installer also creates `.opencode/plugins/evomem-memory.js`. OpenCode loads
+project plugins automatically; no npm install is needed. The plugin adds a
+checkpoint action to the compacted continuation context. Verify with
+`opencode mcp list` and `opencode debug skill`.
+
+#### Connect Gemini CLI to the same project
+
+Create `<project-root>/.gemini/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "evomem": {
+      "httpUrl": "http://localhost:8080/mcp",
+      "headers": {
+        "X-Evomem-Namespace": "personal"
+      },
+      "trust": false
+    }
+  }
+}
+```
+
+Gemini discovers the shared `.agents/skills` directory. Add the managed trigger
+shown below to `GEMINI.md`, restart Gemini, then verify with `/mcp` and
+`/skills list`. All three tools intentionally retain Gemini's normal approval
+prompt because workspace-level fine-grained allow policies are not reliable.
+
+#### Connect Cursor to the same project
+
+Create `<project-root>/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "evomem": {
+      "url": "http://localhost:8080/mcp",
+      "headers": {
+        "X-Evomem-Namespace": "personal"
+      }
+    }
+  }
+}
+```
+
+Cursor discovers `.agents/skills` and root `AGENTS.md`. Reload the workspace,
+then inspect **Settings > Tools & MCP**. Setup does not install a Cursor
+`preCompact` hook because Cursor documents it as observational and its output
+cannot inject model context.
+
+#### Connect Roo Code to the same project
+
+Create `<project-root>/.roo/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "evomem": {
+      "type": "streamable-http",
+      "url": "http://localhost:8080/mcp",
+      "headers": {
+        "X-Evomem-Namespace": "personal"
+      },
+      "alwaysAllow": ["memory_recall", "memory_remember"],
+      "disabled": false
+    }
+  }
+}
+```
+
+Roo Code discovers both `.agents/skills` and root `AGENTS.md`. Reload the
+workspace and inspect the Roo MCP panel. `memory_forget` is deliberately absent
+from `alwaysAllow`.
+
+#### Cline limitation
+
+Cline is not included in `--client all`. Current Cline releases resolve MCP
+settings from user/global storage (or `CLINE_MCP_SETTINGS_PATH`) rather than a
+native project MCP file. Setup will not weaken project isolation by writing a
+global exception. Cline can be added when it supports project-scoped MCP
+configuration.
+
 #### Install the shared memory skill
 
 From this repository, set the target project and copy the skill there:
@@ -216,9 +345,10 @@ ln -s ../../.agents/skills/evomem-memory \
   "$EVOMEM_TARGET_PROJECT/.claude/skills/evomem-memory"
 ```
 
-Codex discovers the project copy under `.agents/skills`; Claude Code follows
-the project symlink under `.claude/skills`. If the Claude path already exists,
-keep one canonical copy and replace the duplicate only after reviewing it.
+Codex, OpenCode, Gemini CLI, Cursor, and Roo Code discover the project copy
+under `.agents/skills`; Claude Code follows the project symlink under
+`.claude/skills`. If the Claude path already exists, keep one canonical copy
+and replace the duplicate only after reviewing it.
 
 The skill recalls prior work before overlapping tasks and checkpoints facts at
 durable milestones: agreed decisions, verified root causes or fixes, tested
@@ -286,11 +416,27 @@ compaction. The hook adds a short model instruction; the LLM then performs
 `memory_recall`, evaluates candidate facts, calls `memory_remember` only when
 needed, and recalls the active task before continuing.
 
+For OpenCode, create `.opencode/plugins/evomem-memory.js` instead:
+
+```js
+export const EvomemMemoryPlugin = async () => ({
+  "experimental.session.compacting": async (_input, output) => {
+    output.context.push(
+      "After compaction, activate evomem-memory and checkpoint verified durable facts before continuing."
+    );
+  },
+});
+```
+
+Gemini CLI, Cursor, and Roo Code do not currently expose a safe equivalent that
+can inject a post-compaction instruction, so their adapters rely on the shared
+skill and project trigger at session start and verified milestones.
+
 #### Add the project trigger
 
-Add this short block to `<project-root>/AGENTS.md` and
-`<project-root>/CLAUDE.md`. Keep the full workflow in the skill instead of
-duplicating it in both instruction files.
+Add this short block to `<project-root>/AGENTS.md`, `<project-root>/CLAUDE.md`,
+and `<project-root>/GEMINI.md` for the harnesses that use each file. Keep the
+full workflow in the skill instead of duplicating it in instruction files.
 
 ```markdown
 <!-- evomem-mcp-rs:start -->
@@ -313,17 +459,18 @@ printf '%s\n' '{"hook_event_name":"SessionStart","source":"compact"}' | \
   evomem-mcp-rs hook compact
 ```
 
-Then start fresh Codex and Claude Code sessions:
+Then start fresh harness sessions:
 
-1. Check `/mcp`; Claude should also list `/evomem-memory` under `/skills`.
-2. Review and trust the project MCP and project hook when each client asks.
-3. Confirm only `memory_recall` and `memory_remember` are pre-approved; keep
-   `memory_forget` as a per-call approval.
-4. Ask Codex to remember a harmless unique test fact.
-5. Ask Claude to recall that fact, proving both use the same namespace.
-6. Repeat the same checkpoint; no duplicate memory should be written.
-7. Run `/compact`, then inspect `/hooks` and confirm the model performs a
-   checkpoint before continuing.
+1. Inspect MCP status: `/mcp` in Codex/Claude/Gemini, `opencode mcp list`,
+   Cursor's **Tools & MCP**, or Roo's MCP panel.
+2. Inspect the `evomem-memory` skill in the harness's skills UI.
+3. Review project trust prompts. Confirm recall/remember approval behavior and
+   keep `memory_forget` interactive.
+4. Ask one harness to remember a harmless unique test fact.
+5. Ask another harness to recall it, proving both use the same namespace.
+6. Repeat the checkpoint; no duplicate memory should be written.
+7. Run `/compact` in Codex, Claude Code, or OpenCode and confirm the checkpoint
+   instruction survives compaction.
 
 ### Troubleshooting and rollback
 
@@ -331,8 +478,11 @@ Then start fresh Codex and Claude Code sessions:
   `EVOMEM_ALLOWED_HOSTS` value.
 - If a hook reports exit 127, rerun setup after reinstalling the binary so the
   hook receives its current absolute path.
-- If the skill is absent, restart the client and inspect `/skills`; make sure
-  the Claude symlink resolves to the installed Codex skill.
+- If the skill is absent, restart the harness and inspect its skills UI; make
+  sure the canonical `.agents/skills/evomem-memory/SKILL.md` exists and the
+  Claude symlink resolves to it.
+- If `--client all` skips an installed editor extension, rerun with its explicit
+  selector, for example `--client roo-code`.
 - If memories duplicate, recall the exact topic before each remember and keep
   one independent fact per note.
 - To roll back, restore the relevant `*.evomem.bak` files, then remove newly

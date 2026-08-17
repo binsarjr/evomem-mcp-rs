@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -59,21 +60,39 @@ sessions. Recall before asking the user to repeat context, and checkpoint new
 durable facts at verified milestones. Never save secrets or raw transcripts.
 <!-- evomem-mcp-rs:end -->"#;
 const CHECKPOINT_CONTEXT: &str = "Run the evomem-memory compaction checkpoint now. Let the LLM inspect the compacted context, call memory_recall for the active project/task and each candidate fact, and call memory_remember only for verified, durable facts that are new or changed. Never save the raw summary, transcript, secrets, hypotheses, or transient progress. If nothing is new, write nothing. Recall the active task state again, then continue it.";
+const OPENCODE_COMPACT_CONTEXT: &str = "Preserve this continuation action after compaction: before continuing the task, activate the evomem-memory skill, recall the active project/task, and checkpoint only verified durable facts that are new or changed. Never save raw summaries, transcripts, secrets, hypotheses, or transient progress.";
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum Client {
     All,
     Codex,
     ClaudeCode,
+    Opencode,
+    GeminiCli,
+    Cursor,
+    RooCode,
 }
 
 impl Client {
-    fn codex(self) -> bool {
-        matches!(self, Self::All | Self::Codex)
-    }
+    const SUPPORTED: [Self; 6] = [
+        Self::Codex,
+        Self::ClaudeCode,
+        Self::Opencode,
+        Self::GeminiCli,
+        Self::Cursor,
+        Self::RooCode,
+    ];
 
-    fn claude(self) -> bool {
-        matches!(self, Self::All | Self::ClaudeCode)
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Codex => "codex",
+            Self::ClaudeCode => "claude-code",
+            Self::Opencode => "opencode",
+            Self::GeminiCli => "gemini-cli",
+            Self::Cursor => "cursor",
+            Self::RooCode => "roo-code",
+        }
     }
 }
 
@@ -130,12 +149,18 @@ pub fn run(args: SetupArgs) -> Result<()> {
     let namespace =
         super::normalize_namespace(Some(&args.namespace)).map_err(anyhow::Error::msg)?;
     let executable = std::env::current_exe().context("cannot locate evomem-mcp-rs executable")?;
-    let changes = plan(&project, &args.url, &namespace, args.client, &executable)?;
+    let clients = select_clients(args.client, &project)?;
+    let changes = plan(&project, &args.url, &namespace, &clients, &executable)?;
 
     println!(
-        "Evomem setup: {} [{}]",
+        "Evomem setup: {} [{}]\nclients    {}",
         project.display(),
-        if args.dry_run { "dry run" } else { "apply" }
+        if args.dry_run { "dry run" } else { "apply" },
+        clients
+            .iter()
+            .map(|client| client.label())
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     if changes.is_empty() {
         println!("unchanged  project already configured");
@@ -161,20 +186,20 @@ fn plan(
     project: &Path,
     url: &str,
     namespace: &str,
-    client: Client,
+    clients: &[Client],
     executable: &Path,
 ) -> Result<Vec<Change>> {
     let mut changes = Vec::new();
     let command = format!("{} hook compact", shell_quote(executable));
+    let selected = |client| clients.contains(&client);
 
-    if client.codex() {
+    if selected(Client::Codex) {
         plan_text(&mut changes, project.join(".codex/config.toml"), |old| {
             merge_codex_config(old, url, namespace)
         })?;
         plan_json(&mut changes, project.join(".codex/hooks.json"), |root| {
             merge_hook(root, &command, true)
         })?;
-        plan_markdown(&mut changes, project.join("AGENTS.md"))?;
 
         if !project.join(".git").exists() {
             let home = std::env::var_os("HOME").ok_or_else(|| anyhow!("HOME is not set"))?;
@@ -186,7 +211,7 @@ fn plan(
         }
     }
 
-    if client.claude() {
+    if selected(Client::ClaudeCode) {
         plan_json(&mut changes, project.join(".mcp.json"), |root| {
             merge_claude_mcp(root, url, namespace)
         })?;
@@ -198,8 +223,127 @@ fn plan(
         plan_markdown(&mut changes, project.join("CLAUDE.md"))?;
     }
 
-    plan_skill(&mut changes, project, client.claude())?;
+    if selected(Client::Opencode) {
+        plan_json(&mut changes, project.join("opencode.json"), |root| {
+            merge_opencode_config(root, url, namespace)
+        })?;
+        plan_bytes(
+            &mut changes,
+            project.join(".opencode/plugins/evomem-memory.js"),
+            opencode_plugin().as_bytes(),
+        )?;
+    }
+
+    if selected(Client::GeminiCli) {
+        plan_json(
+            &mut changes,
+            project.join(".gemini/settings.json"),
+            |root| merge_gemini_config(root, url, namespace),
+        )?;
+        plan_markdown(&mut changes, project.join("GEMINI.md"))?;
+    }
+
+    if selected(Client::Cursor) {
+        plan_json(&mut changes, project.join(".cursor/mcp.json"), |root| {
+            merge_cursor_config(root, url, namespace)
+        })?;
+    }
+
+    if selected(Client::RooCode) {
+        plan_json(&mut changes, project.join(".roo/mcp.json"), |root| {
+            merge_roo_config(root, url, namespace)
+        })?;
+    }
+
+    if clients.iter().any(|client| {
+        matches!(
+            client,
+            Client::Codex | Client::Opencode | Client::Cursor | Client::RooCode
+        )
+    }) {
+        plan_markdown(&mut changes, project.join("AGENTS.md"))?;
+    }
+
+    plan_skill(&mut changes, project, selected(Client::ClaudeCode))?;
     Ok(changes)
+}
+
+fn select_clients(requested: Client, project: &Path) -> Result<Vec<Client>> {
+    if requested != Client::All {
+        return Ok(vec![requested]);
+    }
+    let path = std::env::var_os("PATH");
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let clients = Client::SUPPORTED
+        .into_iter()
+        .filter(|client| client_detected(*client, project, path.as_deref(), home.as_deref()))
+        .collect::<Vec<_>>();
+    if clients.is_empty() {
+        bail!("no supported clients detected; use --client <name> to configure one explicitly");
+    }
+    Ok(clients)
+}
+
+fn client_detected(
+    client: Client,
+    project: &Path,
+    path: Option<&OsStr>,
+    home: Option<&Path>,
+) -> bool {
+    let commands = match client {
+        Client::Codex => &["codex"][..],
+        Client::ClaudeCode => &["claude"][..],
+        Client::Opencode => &["opencode"][..],
+        Client::GeminiCli => &["gemini"][..],
+        Client::Cursor => &["cursor", "cursor-agent"][..],
+        Client::RooCode => &["roo"][..],
+        Client::All => return false,
+    };
+    let marker = match client {
+        Client::Codex => project.join(".codex").exists(),
+        Client::ClaudeCode => project.join(".claude").exists(),
+        Client::Opencode => {
+            project.join(".opencode").exists() || project.join("opencode.json").exists()
+        }
+        Client::GeminiCli => project.join(".gemini").exists(),
+        Client::Cursor => project.join(".cursor").exists(),
+        Client::RooCode => project.join(".roo").exists(),
+        Client::All => false,
+    };
+    marker
+        || command_exists(path, commands)
+        || (client == Client::Cursor && Path::new("/Applications/Cursor.app").exists())
+        || (client == Client::RooCode && roo_extension_exists(home))
+}
+
+fn command_exists(path: Option<&OsStr>, commands: &[&str]) -> bool {
+    path.into_iter()
+        .flat_map(std::env::split_paths)
+        .any(|directory| {
+            commands
+                .iter()
+                .any(|command| directory.join(command).is_file())
+        })
+}
+
+fn roo_extension_exists(home: Option<&Path>) -> bool {
+    let Some(home) = home else { return false };
+    [
+        ".vscode/extensions",
+        ".vscode-insiders/extensions",
+        ".cursor/extensions",
+        ".windsurf/extensions",
+    ]
+    .into_iter()
+    .filter_map(|directory| fs::read_dir(home.join(directory)).ok())
+    .flatten()
+    .filter_map(Result::ok)
+    .any(|entry| {
+        entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("rooveterinaryinc.roo-cline-")
+    })
 }
 
 fn plan_text<F>(changes: &mut Vec<Change>, path: PathBuf, merge: F) -> Result<()>
@@ -371,6 +515,70 @@ fn merge_claude_settings(root: &mut JsonValue, command: &str) -> Result<()> {
         enabled.push(json!("evomem"));
     }
     Ok(())
+}
+
+fn merge_opencode_config(root: &mut JsonValue, url: &str, namespace: &str) -> Result<()> {
+    let object = root_object(root)?;
+    let servers = object_entry(object, "mcp")?;
+    let server = object_entry(servers, "evomem")?;
+    server.insert("type".into(), json!("remote"));
+    server.insert("url".into(), json!(url));
+    server.insert("enabled".into(), json!(true));
+    let headers = object_entry(server, "headers")?;
+    headers.insert("X-Evomem-Namespace".into(), json!(namespace));
+
+    let permissions = object_entry(object, "permission")?;
+    permissions.insert("evomem_memory_recall".into(), json!("allow"));
+    permissions.insert("evomem_memory_remember".into(), json!("allow"));
+    permissions.insert("evomem_memory_forget".into(), json!("ask"));
+    Ok(())
+}
+
+fn merge_gemini_config(root: &mut JsonValue, url: &str, namespace: &str) -> Result<()> {
+    let servers = object_entry(root_object(root)?, "mcpServers")?;
+    let server = object_entry(servers, "evomem")?;
+    server.insert("httpUrl".into(), json!(url));
+    server.insert("trust".into(), json!(false));
+    let headers = object_entry(server, "headers")?;
+    headers.insert("X-Evomem-Namespace".into(), json!(namespace));
+    Ok(())
+}
+
+fn merge_cursor_config(root: &mut JsonValue, url: &str, namespace: &str) -> Result<()> {
+    let servers = object_entry(root_object(root)?, "mcpServers")?;
+    let server = object_entry(servers, "evomem")?;
+    server.insert("url".into(), json!(url));
+    let headers = object_entry(server, "headers")?;
+    headers.insert("X-Evomem-Namespace".into(), json!(namespace));
+    Ok(())
+}
+
+fn merge_roo_config(root: &mut JsonValue, url: &str, namespace: &str) -> Result<()> {
+    let servers = object_entry(root_object(root)?, "mcpServers")?;
+    let server = object_entry(servers, "evomem")?;
+    server.insert("type".into(), json!("streamable-http"));
+    server.insert("url".into(), json!(url));
+    server.insert("disabled".into(), json!(false));
+    let headers = object_entry(server, "headers")?;
+    headers.insert("X-Evomem-Namespace".into(), json!(namespace));
+    let always_allow = array_entry(server, "alwaysAllow")?;
+    always_allow.retain(|tool| tool.as_str() != Some("memory_forget"));
+    for tool in ["memory_recall", "memory_remember"] {
+        if !always_allow
+            .iter()
+            .any(|value| value.as_str() == Some(tool))
+        {
+            always_allow.push(json!(tool));
+        }
+    }
+    Ok(())
+}
+
+fn opencode_plugin() -> String {
+    format!(
+        "export const EvomemMemoryPlugin = async () => ({{\n  \"experimental.session.compacting\": async (_input, output) => {{\n    output.context.push({});\n  }},\n}});\n",
+        serde_json::to_string(OPENCODE_COMPACT_CONTEXT).expect("static string is valid JSON")
+    )
 }
 
 fn merge_codex_config(old: &str, url: &str, namespace: &str) -> Result<String> {
@@ -628,9 +836,16 @@ fn compact_hook_output(input: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
     fn temp_project() -> PathBuf {
-        let path = std::env::temp_dir().join(format!("evomem-setup-test-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "evomem-setup-test-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(path.join(".git")).unwrap();
         path
@@ -647,7 +862,7 @@ mod tests {
             &project,
             "http://localhost:8080/mcp",
             "demo",
-            Client::All,
+            &Client::SUPPORTED,
             Path::new("/opt/evomem-mcp-rs"),
         )
         .unwrap();
@@ -659,7 +874,7 @@ mod tests {
             &project,
             "http://localhost:8080/mcp",
             "demo",
-            Client::All,
+            &Client::SUPPORTED,
             Path::new("/opt/evomem-mcp-rs"),
         )
         .unwrap();
@@ -673,7 +888,60 @@ mod tests {
         assert!(fs::read_to_string(project.join("AGENTS.md"))
             .unwrap()
             .starts_with("# Existing"));
+        assert!(fs::read_to_string(project.join("opencode.json"))
+            .unwrap()
+            .contains("evomem_memory_forget"));
+        assert!(fs::read_to_string(project.join(".gemini/settings.json"))
+            .unwrap()
+            .contains("\"trust\": false"));
+        assert!(fs::read_to_string(project.join(".cursor/mcp.json"))
+            .unwrap()
+            .contains("X-Evomem-Namespace"));
+        assert!(fs::read_to_string(project.join(".roo/mcp.json"))
+            .unwrap()
+            .contains("streamable-http"));
+        assert!(fs::read_to_string(project.join("GEMINI.md"))
+            .unwrap()
+            .contains("Evomem long-term memory"));
         let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn detects_project_markers_and_path_commands() {
+        let project = temp_project();
+        fs::create_dir_all(project.join(".roo")).unwrap();
+        let bin = project.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("opencode"), "").unwrap();
+        let path = std::env::join_paths([&bin]).unwrap();
+
+        assert!(client_detected(
+            Client::RooCode,
+            &project,
+            Some(path.as_os_str()),
+            None
+        ));
+        assert!(client_detected(
+            Client::Opencode,
+            &project,
+            Some(path.as_os_str()),
+            None
+        ));
+        assert!(!client_detected(
+            Client::GeminiCli,
+            &project,
+            Some(path.as_os_str()),
+            None
+        ));
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn opencode_plugin_is_plain_javascript() {
+        let plugin = opencode_plugin();
+        assert!(plugin.contains("\"experimental.session.compacting\""));
+        assert!(!plugin.contains("\\\\\"experimental.session.compacting"));
+        assert!(plugin.contains("output.context.push"));
     }
 
     #[test]
