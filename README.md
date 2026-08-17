@@ -78,9 +78,68 @@ sentences ("works at", "founded", "advises", "attended", "invested in", fallback
 
 ## Registering with MCP clients
 
-The namespace is pinned client-side via a header. One server, many clients — each client/agent points at its own namespace:
+The namespace is pinned client-side via a header. To share one brain between
+Codex and Claude Code, use the same namespace and a different author for each
+client. Recall searches the whole namespace; writes remain attributable to the
+client that created them.
 
-`claude_desktop_config.json`:
+### Codex
+
+Add this to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.evomem]
+url = "http://localhost:8080/mcp"
+http_headers = { "X-Evomem-Namespace" = "personal", "X-Evomem-Author" = "codex" }
+```
+
+Start a new Codex session, then verify with:
+
+```bash
+codex mcp list
+```
+
+In the Codex TUI, `/mcp` shows whether the server is connected.
+
+### Claude Code
+
+Register the same brain at user scope. `alwaysLoad` is practical here because
+evomem exposes only three tools and memory should be available from the first
+turn:
+
+```bash
+claude mcp add-json --scope user evomem \
+  '{"type":"http","url":"http://localhost:8080/mcp","headers":{"X-Evomem-Namespace":"personal","X-Evomem-Author":"claude"},"alwaysLoad":true}'
+claude mcp get evomem
+```
+
+`alwaysLoad` requires Claude Code 2.1.121 or newer. Inside Claude Code, `/mcp`
+shows connection health.
+
+### Make memory proactive
+
+The server advertises a conservative memory policy through MCP `instructions`.
+For consistent behavior even in clients that do not apply server instructions,
+put this block in `~/.codex/AGENTS.md` for Codex and
+`~/.claude/CLAUDE.md` for Claude Code:
+
+```markdown
+## Long-term memory
+
+- Before non-trivial work that may overlap past work, call `memory_recall` with the project, task, and key terms.
+- Before asking for information the user may already have shared, recall it first.
+- After a durable decision, verified fix, configuration change, or meaningful result, recall the topic to avoid duplicates, then call `memory_remember` once with a concise, self-contained note useful to a future session.
+- Remember stable preferences, project facts, paths, commands, decisions, outcomes, and unresolved risks. Skip transient progress, duplicates, secrets, credentials, and raw sensitive data.
+- Use `memory_forget` only when the user explicitly asks to remove a memory.
+```
+
+This follows Evonic's effective pattern—retrieve before responding and capture
+durable outcomes—without its LLM-powered automatic extraction and organizer.
+
+### Claude Desktop
+
+One server can also expose separate namespaces to different desktop agents.
+For example, in `claude_desktop_config.json`:
 
 ```json
 {

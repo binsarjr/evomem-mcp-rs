@@ -316,7 +316,7 @@ struct ForgetParams {
 // Tools
 // ────────────────────────────────────────────────────────────────────────────
 
-#[tool_router(server_handler)]
+#[tool_router]
 impl EvomemServer {
     #[tool(description = "Remember a durable fact/thought into long-term memory (indexed immediately). Wrap entity names in [[Name]] to wire the knowledge graph (e.g. \"[[Alice]] works at [[Nuwaira]]\"); use a relation verb (\"works at\", \"founded\") for a typed edge. Pass 1-4 lowercase tags (person, project, meeting, decision, preference, ...) to categorize the note.")]
     async fn memory_remember(
@@ -452,6 +452,34 @@ impl EvomemServer {
         })
         .await
         .map(Json)
+    }
+}
+
+#[rmcp::tool_handler(
+    instructions = "Use memory_recall before non-trivial work when prior context may help and before asking for information the user may have shared. Before memory_remember, recall the topic and skip duplicates. Remember durable preferences, decisions, project facts, stable paths, verified outcomes, and unresolved risks; skip transient status, secrets, credentials, and sensitive raw data. Use memory_forget only when the user asks. After meaningful work, remember one concise, self-contained outcome useful to a future session."
+)]
+impl rmcp::ServerHandler for EvomemServer {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advertises_memory_policy() {
+        let server = EvomemServer {
+            state: AppState {
+                root: PathBuf::new(),
+                stores: Arc::new(Mutex::new(HashMap::new())),
+                embedder: Arc::new(HashEmbedder),
+            },
+        };
+        let instructions = rmcp::ServerHandler::get_info(&server)
+            .instructions
+            .expect("server instructions");
+
+        assert!(instructions.contains("memory_recall"));
+        assert!(instructions.contains("memory_remember"));
+        assert!(instructions.contains("memory_forget"));
     }
 }
 
