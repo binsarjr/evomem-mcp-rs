@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
+use clap::{Parser, Subcommand};
 use evomem::embed::{Embedder, HashEmbedder};
 use evomem::error::EvoError;
 use evomem::model::Mode;
@@ -19,9 +20,35 @@ use evomem::{ingest, search, think};
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
-use rmcp::{service::RequestContext, schemars, tool, tool_router, RoleServer};
+use rmcp::{schemars, service::RequestContext, tool, tool_router, RoleServer};
 use serde::Deserialize;
 use serde_json::Value;
+
+mod setup;
+
+#[derive(Parser)]
+#[command(version, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Configure Evomem for a project.
+    Setup(setup::SetupArgs),
+    /// Internal lifecycle-hook entrypoint.
+    #[command(hide = true)]
+    Hook {
+        #[command(subcommand)]
+        event: HookEvent,
+    },
+}
+
+#[derive(Subcommand)]
+enum HookEvent {
+    Compact,
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // State
@@ -63,7 +90,10 @@ fn normalize_namespace(ns: Option<&str>) -> Result<String, String> {
     if ns == "." || ns == ".." || ns.contains('/') || ns.contains('\\') || ns.contains('\0') {
         return Err(format!("invalid namespace '{ns}'"));
     }
-    if ns.chars().any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_')) {
+    if ns
+        .chars()
+        .any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    {
         return Err(format!(
             "namespace '{ns}' contains invalid characters (a-z, 0-9, '-', '_' only)"
         ));
@@ -74,16 +104,23 @@ fn normalize_namespace(ns: Option<&str>) -> Result<String, String> {
 /// Validate an author (team member) name and normalize it to a safe folder
 /// segment. Reserved names that evomem hard-excludes from recall are rejected.
 fn normalize_author(author: Option<&str>) -> Result<String, String> {
-    let default =
-        std::env::var("EVOMEM_DEFAULT_AUTHOR").unwrap_or_else(|_| "inbox".to_string());
+    let default = std::env::var("EVOMEM_DEFAULT_AUTHOR").unwrap_or_else(|_| "inbox".to_string());
     let author: &str = author
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or(default.as_str());
-    if author == "." || author == ".." || author.contains('/') || author.contains('\\') || author.contains('\0') {
+    if author == "."
+        || author == ".."
+        || author.contains('/')
+        || author.contains('\\')
+        || author.contains('\0')
+    {
         return Err(format!("invalid author '{author}'"));
     }
-    if author.chars().any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_')) {
+    if author
+        .chars()
+        .any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    {
         return Err(format!(
             "author '{author}' contains invalid characters (a-z, 0-9, '-', '_' only)"
         ));
@@ -318,7 +355,9 @@ struct ForgetParams {
 
 #[tool_router]
 impl EvomemServer {
-    #[tool(description = "Remember a durable fact/thought into long-term memory (indexed immediately). Wrap entity names in [[Name]] to wire the knowledge graph (e.g. \"[[Alice]] works at [[Nuwaira]]\"); use a relation verb (\"works at\", \"founded\") for a typed edge. Pass 1-4 lowercase tags (person, project, meeting, decision, preference, ...) to categorize the note.")]
+    #[tool(
+        description = "Remember a durable fact/thought into long-term memory (indexed immediately). Wrap entity names in [[Name]] to wire the knowledge graph (e.g. \"[[Alice]] works at [[Nuwaira]]\"); use a relation verb (\"works at\", \"founded\") for a typed edge. Pass 1-4 lowercase tags (person, project, meeting, decision, preference, ...) to categorize the note."
+    )]
     async fn memory_remember(
         &self,
         Parameters(p): Parameters<RememberParams>,
@@ -379,7 +418,9 @@ impl EvomemServer {
         .map(Json)
     }
 
-    #[tool(description = "Recall from long-term memory. mode \"search\" (default): hybrid keyword+vector lookup. mode \"think\": synthesize facts with citations and knowledge gaps. mode \"graph\": traverse the knowledge graph from an entity (query = entity name; use edge/hops to steer).")]
+    #[tool(
+        description = "Recall from long-term memory. mode \"search\" (default): hybrid keyword+vector lookup. mode \"think\": synthesize facts with citations and knowledge gaps. mode \"graph\": traverse the knowledge graph from an entity (query = entity name; use edge/hops to steer)."
+    )]
     async fn memory_recall(
         &self,
         Parameters(p): Parameters<RecallParams>,
@@ -393,37 +434,39 @@ impl EvomemServer {
         let hops = p.hops.unwrap_or(2);
 
         match p.mode.as_deref().unwrap_or("search") {
-            "graph" => {
-                run_block(store, emb, move |s, _e| {
-                    let doc = s
-                        .resolve_doc(&query)?
-                        .ok_or_else(|| EvoError::DocNotFound(query.clone()))?;
-                    let edges = search::graph::traverse(s, doc.id, edge.as_deref(), hops)?;
-                    Ok(serde_json::json!({ "start": doc.slug, "edges": edges }))
-                })
-                .await
-                .map(Json)
-            }
-            "think" => {
-                run_block(store, emb, move |s, e| {
-                    let resp = think::think(s, e, &query, parse_mode(Some("balanced")), chrono::Utc::now())?;
-                    Ok(serde_json::to_value(&resp).expect("serializable"))
-                })
-                .await
-                .map(Json)
-            }
-            _ => {
-                run_block(store, emb, move |s, e| {
-                    let resp = search::search(s, e, &query, parse_mode(None), 0.03)?;
-                    Ok(serde_json::to_value(&resp).expect("serializable"))
-                })
-                .await
-                .map(Json)
-            }
+            "graph" => run_block(store, emb, move |s, _e| {
+                let doc = s
+                    .resolve_doc(&query)?
+                    .ok_or_else(|| EvoError::DocNotFound(query.clone()))?;
+                let edges = search::graph::traverse(s, doc.id, edge.as_deref(), hops)?;
+                Ok(serde_json::json!({ "start": doc.slug, "edges": edges }))
+            })
+            .await
+            .map(Json),
+            "think" => run_block(store, emb, move |s, e| {
+                let resp = think::think(
+                    s,
+                    e,
+                    &query,
+                    parse_mode(Some("balanced")),
+                    chrono::Utc::now(),
+                )?;
+                Ok(serde_json::to_value(&resp).expect("serializable"))
+            })
+            .await
+            .map(Json),
+            _ => run_block(store, emb, move |s, e| {
+                let resp = search::search(s, e, &query, parse_mode(None), 0.03)?;
+                Ok(serde_json::to_value(&resp).expect("serializable"))
+            })
+            .await
+            .map(Json),
         }
     }
 
-    #[tool(description = "Forget (soft-delete) a captured document by slug/title/alias. Removes its markdown file and re-indexes so it no longer surfaces in recall.")]
+    #[tool(
+        description = "Forget (soft-delete) a captured document by slug/title/alias. Removes its markdown file and re-indexes so it no longer surfaces in recall."
+    )]
     async fn memory_forget(
         &self,
         Parameters(p): Parameters<ForgetParams>,
@@ -460,37 +503,23 @@ impl EvomemServer {
 )]
 impl rmcp::ServerHandler for EvomemServer {}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn advertises_memory_policy() {
-        let server = EvomemServer {
-            state: AppState {
-                root: PathBuf::new(),
-                stores: Arc::new(Mutex::new(HashMap::new())),
-                embedder: Arc::new(HashEmbedder),
-            },
-        };
-        let instructions = rmcp::ServerHandler::get_info(&server)
-            .instructions
-            .expect("server instructions");
-
-        assert!(instructions.contains("memory_recall"));
-        assert!(instructions.contains("memory_remember"));
-        assert!(instructions.contains("memory_forget"));
-    }
-}
-
 // ────────────────────────────────────────────────────────────────────────────
 // Entry point
 // ────────────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let root: PathBuf =
-        std::env::var("EVOMEM_ROOT").unwrap_or_else(|_| "./vault".to_string()).into();
+    match Cli::parse().command {
+        Some(Command::Setup(args)) => return setup::run(args),
+        Some(Command::Hook {
+            event: HookEvent::Compact,
+        }) => return setup::run_compact_hook(),
+        None => {}
+    }
+
+    let root: PathBuf = std::env::var("EVOMEM_ROOT")
+        .unwrap_or_else(|_| "./vault".to_string())
+        .into();
     std::fs::create_dir_all(&root)?;
     let root_display = root.display().to_string();
     let bind = std::env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
@@ -530,4 +559,27 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("evomem-mcp-rs listening on http://{bind}/mcp (root: {root_display})");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advertises_memory_policy() {
+        let server = EvomemServer {
+            state: AppState {
+                root: PathBuf::new(),
+                stores: Arc::new(Mutex::new(HashMap::new())),
+                embedder: Arc::new(HashEmbedder),
+            },
+        };
+        let instructions = rmcp::ServerHandler::get_info(&server)
+            .instructions
+            .expect("server instructions");
+
+        assert!(instructions.contains("memory_recall"));
+        assert!(instructions.contains("memory_remember"));
+        assert!(instructions.contains("memory_forget"));
+    }
 }
