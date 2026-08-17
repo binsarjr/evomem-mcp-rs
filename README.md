@@ -76,65 +76,212 @@ sentences ("works at", "founded", "advises", "attended", "invested in", fallback
 
 `memory_forget` removes the document's `.md` file and re-indexes (soft-delete).
 
-## Registering with MCP clients
+## Codex and Claude Code setup
 
-The namespace is pinned client-side via a header. To share one brain between
-Codex and Claude Code, use the same namespace and a different author for each
-client. Recall searches the whole namespace; writes remain attributable to the
-client that created them.
+The following project-scoped setup gives Codex and Claude Code one shared brain,
+proactive recall, and LLM-curated memory checkpoints without enabling evomem in
+unrelated projects. The hook never stores a transcript or compact summary
+itself: it asks the main model to recall, deduplicate, and save only new durable
+facts.
 
-### Codex
+Examples use `http://localhost:8080/mcp` and namespace `personal`. Replace the
+URL when the server runs on another machine. Use the same namespace in both
+clients to share a brain.
 
-Add this to `~/.codex/config.toml`:
+### Step 1: start the server
+
+From this repository:
+
+```bash
+EVOMEM_ROOT=./vault BIND=0.0.0.0:8080 cargo run --release
+```
+
+For Docker, run `docker compose up --build` instead. When connecting through a
+hostname such as `raspberrypi.local`, include it in `EVOMEM_ALLOWED_HOSTS`.
+
+### Step 2: connect Codex to one project
+
+Create `<project-root>/.codex/config.toml`:
 
 ```toml
 [mcp_servers.evomem]
 url = "http://localhost:8080/mcp"
-http_headers = { "X-Evomem-Namespace" = "personal", "X-Evomem-Author" = "codex" }
+http_headers = { "X-Evomem-Namespace" = "personal" }
+
+[mcp_servers.evomem.tools.memory_recall]
+approval_mode = "approve"
+
+[mcp_servers.evomem.tools.memory_remember]
+approval_mode = "approve"
 ```
 
-Start a new Codex session, then verify with:
+The two per-tool approvals let proactive recall and checkpoints run without
+stopping for confirmation. `memory_forget` intentionally remains interactive.
 
-```bash
-codex mcp list
+If the project root is not itself a Git repository (for example, a workspace
+that contains several child repositories), add this discovery setting to the
+user-level `~/.codex/config.toml`:
+
+```toml
+project_root_markers = [".git", ".codex"]
 ```
 
-In the Codex TUI, `/mcp` shows whether the server is connected.
+This changes project-root discovery only; the MCP URL and namespace remain in
+the project config. Start Codex from that project root and use `/mcp` to verify
+the connection. For headless checks in a non-Git workspace, add
+`--skip-git-repo-check` to `codex exec`.
 
-### Claude Code
+### Step 3: connect Claude Code to the same project
 
-Register the same brain at user scope. `alwaysLoad` is practical here because
-evomem exposes only three tools and memory should be available from the first
-turn:
+From the project root, register the same URL and namespace at project scope:
 
 ```bash
-claude mcp add-json --scope user evomem \
-  '{"type":"http","url":"http://localhost:8080/mcp","headers":{"X-Evomem-Namespace":"personal","X-Evomem-Author":"claude"},"alwaysLoad":true}'
+claude mcp add-json --scope project evomem \
+  '{"type":"http","url":"http://localhost:8080/mcp","headers":{"X-Evomem-Namespace":"personal"},"alwaysLoad":true}'
 claude mcp get evomem
 ```
 
-`alwaysLoad` requires Claude Code 2.1.121 or newer. Inside Claude Code, `/mcp`
-shows connection health.
+This creates `<project-root>/.mcp.json`. Approve the project MCP when Claude
+Code asks on first launch. `alwaysLoad` keeps all three memory tools available
+from the first turn and requires Claude Code 2.1.121 or newer. Inside Claude
+Code, use `/mcp` to inspect connection health.
 
-### Make memory proactive
+### Step 4: install the shared memory skill
 
-The server advertises a conservative memory policy through MCP `instructions`.
-For consistent behavior even in clients that do not apply server instructions,
-put this block in `~/.codex/AGENTS.md` for Codex and
-`~/.claude/CLAUDE.md` for Claude Code:
+From this repository, set the target project and copy the skill there:
 
-```markdown
-## Long-term memory
-
-- Before non-trivial work that may overlap past work, call `memory_recall` with the project, task, and key terms.
-- Before asking for information the user may already have shared, recall it first.
-- After a durable decision, verified fix, configuration change, or meaningful result, recall the topic to avoid duplicates, then call `memory_remember` once with a concise, self-contained note useful to a future session.
-- Remember stable preferences, project facts, paths, commands, decisions, outcomes, and unresolved risks. Skip transient progress, duplicates, secrets, credentials, and raw sensitive data.
-- Use `memory_forget` only when the user explicitly asks to remove a memory.
+```bash
+EVOMEM_TARGET_PROJECT=/absolute/path/to/project
+mkdir -p "$EVOMEM_TARGET_PROJECT/.agents/skills/evomem-memory" \
+  "$EVOMEM_TARGET_PROJECT/.claude/skills"
+cp -R integrations/agent-memory/evomem-memory/. \
+  "$EVOMEM_TARGET_PROJECT/.agents/skills/evomem-memory/"
+ln -s ../../.agents/skills/evomem-memory \
+  "$EVOMEM_TARGET_PROJECT/.claude/skills/evomem-memory"
 ```
 
-This follows Evonic's effective pattern—retrieve before responding and capture
-durable outcomes—without its LLM-powered automatic extraction and organizer.
+Codex discovers the project copy under `.agents/skills`; Claude Code follows
+the project symlink under `.claude/skills`. If the Claude path already exists,
+keep one canonical copy and replace the duplicate only after reviewing it.
+
+The skill recalls prior work before overlapping tasks and checkpoints facts at
+durable milestones: agreed decisions, verified root causes or fixes, tested
+configuration, stable preferences, important paths/commands, and unresolved
+blockers. It skips hypotheses, transient progress, duplicates, secrets, and raw
+logs.
+
+### Step 5: add the compact checkpoint hook
+
+Create or merge `<project-root>/.codex/hooks.json`. Replace
+`/absolute/path/to/project` with the actual project root:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "^compact$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"/absolute/path/to/project/.agents/skills/evomem-memory/scripts/compact_checkpoint.py\"",
+            "timeout": 5,
+            "statusMessage": "Checkpointing durable memory"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Merge the equivalent entry into `<project-root>/.claude/settings.json` for a
+shared project configuration, or `.claude/settings.local.json` for a local-only
+installation. Do not replace existing settings or hooks:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"/absolute/path/to/project/.agents/skills/evomem-memory/scripts/compact_checkpoint.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "mcp__evomem__memory_recall",
+      "mcp__evomem__memory_remember"
+    ]
+  }
+}
+```
+
+Both clients emit `SessionStart` with source `compact` after manual or automatic
+compaction. The script adds a short model instruction; the LLM then performs
+`memory_recall`, evaluates candidate facts, calls `memory_remember` only when
+needed, and recalls the active task before continuing.
+
+### Step 6: add the project trigger
+
+Add this short block to `<project-root>/AGENTS.md` and
+`<project-root>/CLAUDE.md`. Keep the full workflow in the skill instead of
+duplicating it in both instruction files.
+
+```markdown
+## Evomem long-term memory
+
+Use the `evomem-memory` skill for non-trivial work that may overlap prior
+sessions. Recall before asking the user to repeat context, and checkpoint new
+durable facts at verified milestones. Never save secrets or raw transcripts.
+```
+
+The server also advertises the baseline policy through MCP `instructions`.
+
+### Step 7: verify the complete setup
+
+From the project root, validate the installed files:
+
+```bash
+python3 -m py_compile \
+  .agents/skills/evomem-memory/scripts/compact_checkpoint.py
+printf '%s\n' '{"hook_event_name":"SessionStart","source":"compact"}' | \
+  /usr/bin/python3 \
+  .agents/skills/evomem-memory/scripts/compact_checkpoint.py
+```
+
+Then start fresh Codex and Claude Code sessions:
+
+1. Check `/mcp`; Claude should also list `/evomem-memory` under `/skills`.
+2. Review and trust the project MCP and project hook when each client asks.
+3. Confirm only `memory_recall` and `memory_remember` are pre-approved; keep
+   `memory_forget` as a per-call approval.
+4. Ask Codex to remember a harmless unique test fact.
+5. Ask Claude to recall that fact, proving both use the same namespace.
+6. Repeat the same checkpoint; no duplicate memory should be written.
+7. Run `/compact`, then inspect `/hooks` and confirm the model performs a
+   checkpoint before continuing.
+
+### Troubleshooting and rollback
+
+- If the MCP connection fails, verify the URL, server process, firewall, and
+  `EVOMEM_ALLOWED_HOSTS` value.
+- If a hook reports exit 127, keep the absolute `/usr/bin/python3` path shown
+  above and verify it exists on the machine.
+- If the skill is absent, restart the client and inspect `/skills`; make sure
+  the Claude symlink resolves to the installed Codex skill.
+- If memories duplicate, recall the exact topic before each remember and keep
+  one independent fact per note.
+- To roll back, remove only the project's `evomem` MCP entry, the
+  `SessionStart` hook group shown above, the short project trigger, and the
+  project skill. Leave global and unrelated project configuration untouched.
 
 ### Claude Desktop
 

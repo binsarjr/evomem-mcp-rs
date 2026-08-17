@@ -1,0 +1,4 @@
+interface:
+  display_name: "Evomem Memory"
+  short_description: "Recall and capture durable cross-session facts"
+  default_prompt: "Use $evomem-memory to recall relevant context and checkpoint durable facts."
